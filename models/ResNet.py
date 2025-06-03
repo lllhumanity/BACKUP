@@ -7,6 +7,8 @@ from tqdm import tqdm
 import os
 from sklearn.metrics import fbeta_score
 from scipy.stats import pearsonr
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, classification_report
 
 batch_size = 25600
 train_data_dir = "train_data"
@@ -174,6 +176,81 @@ def calculate_metrics(all_labels, all_preds, all_probs):
         print(f"[Error] Pearson correlation calculation failed: {e}")
     return results
 
+def evaluate_model(model, dataloader, device, criterion=None, save_confusion_matrix=False):
+    """
+    评估模型性能并返回详细指标
+    """
+    model.eval()
+    test_loss = 0.0
+    total_samples = 0
+    
+    all_labels = []
+    all_preds = []
+    all_probs = []
+    all_outputs = []
+    
+    with torch.no_grad():
+        pbar = tqdm(dataloader, desc="Evaluating Model")
+        for batch_idx, (X, y) in enumerate(pbar):
+            X, y = X.to(device), y.to(device)
+            outputs = model(X)
+            
+            if criterion is not None:
+                loss = criterion(outputs, y)
+                test_loss += loss.item() * X.size(0)
+            
+            probs = torch.softmax(outputs, dim=-1)
+            _, preds = torch.max(outputs, dim=-1)
+            
+            total_samples += X.size(0)
+            all_labels.append(y.cpu().numpy())
+            all_preds.append(preds.cpu().numpy())
+            all_probs.append(probs.cpu().numpy())
+            all_outputs.append(outputs.cpu().numpy())
+    
+    all_labels = np.concatenate(all_labels)
+    all_preds = np.concatenate(all_preds)
+    all_probs = np.concatenate(all_probs)
+    all_outputs = np.concatenate(all_outputs)
+    
+    metrics = calculate_metrics(all_labels, all_preds, all_probs)
+    
+    if criterion is not None:
+        test_loss = test_loss / total_samples
+        metrics['loss'] = test_loss
+    
+    # 计算额外指标
+    metrics['classification_report'] = classification_report(all_labels, all_preds, output_dict=True)
+    metrics['confusion_matrix'] = confusion_matrix(all_labels, all_preds)
+    
+    # 可视化混淆矩阵
+    if save_confusion_matrix:
+        cm = metrics['confusion_matrix']
+        plt.figure(figsize=(10, 8))
+        plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        plt.title('Confusion Matrix')
+        plt.colorbar()
+        
+        classes = np.unique(all_labels)
+        tick_marks = np.arange(len(classes))
+        plt.xticks(tick_marks, classes)
+        plt.yticks(tick_marks, classes)
+        
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                plt.text(j, i, format(cm[i, j], 'd'),
+                         horizontalalignment="center",
+                         color="white" if cm[i, j] > thresh else "black")
+        
+        plt.ylabel('True label')
+        plt.xlabel('Predicted label')
+        plt.tight_layout()
+        plt.savefig('confusion_matrix.png')
+        plt.close()
+    
+    return metrics
+
 def train_model(
     num_epochs=10,
     batch_size = 256,
@@ -308,12 +385,73 @@ def train_model(
         #gc.collect()
         #torch.cuda.empty_cache()
             
+    
+
+    # 6. 训练结束后评估最佳模型
+    print("\n[Final Evaluation] Evaluating best model on test data...")
+
+    # 加载最佳模型
+    if os.path.exists("Alex_best_model.pth"):
+        model.load_state_dict(torch.load("Alex_best_model.pth", map_location=device))
+        print("Loaded best model for evaluation")
+    else:
+        print("Warning: Best model not found. Using last trained model for evaluation")
+
+    # 创建测试数据加载器
+    test_data_dir = "test_data"  # 替换为实际的测试数据目录
+    if not os.path.exists(test_data_dir):
+        print(f"Warning: Test data directory '{test_data_dir}' not found. Using validation data for evaluation")
+        test_data_dir = "validate_data"
+
+    test_dataloader = load_data(test_data_dir, batch_size=batch_size, ndp=0)
+
+    # 详细评估最佳模型
+    metrics = evaluate_model(model, test_dataloader, device, criterion, save_confusion_matrix=True)
+
+    # 打印详细结果
+    print("\n" + "="*50)
+    print("FINAL MODEL EVALUATION RESULTS")
+    print("="*50)
+    print(f"Test Loss: {metrics['loss']:.4f}")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"F2 Score: {metrics['f2_score']:.4f}")
+    print(f"Pearson CC: {metrics['pcc']:.4f}")
+
+    # 打印分类报告
+    print("\nClassification Report:")
+    report = metrics['classification_report']
+    for label in report:
+        if label in ['0', '1']:  # 假设是二分类
+            print(f"Class {label}: Precision={report[label]['precision']:.4f}, Recall={report[label]['recall']:.4f}, F1-score={report[label]['f1-score']:.4f}")
+
+    # 打印混淆矩阵
+    print("\nConfusion Matrix:")
+    print(metrics['confusion_matrix'])
+
+    # 保存评估结果
+    import numpy as np
+    from sklearn.metrics import classification_report
+    with open('evaluation_results.txt', 'w') as f:
+        f.write("FINAL MODEL EVALUATION RESULTS\n")
+        f.write("="*50 + "\n")
+        f.write(f"Test Loss: {metrics['loss']:.4f}\n")
+        f.write(f"Accuracy: {metrics['accuracy']:.4f}\n")
+        f.write(f"F2 Score: {metrics['f2_score']:.4f}\n")
+        f.write(f"Pearson CC: {metrics['pcc']:.4f}\n\n")
+        f.write("Classification Report:\n")
+        f.write(classification_report(all_labels, all_preds))
+        f.write("\nConfusion Matrix:\n")
+        f.write(np.array2string(metrics['confusion_matrix']))
+
+    print("Evaluation results saved to evaluation_results.txt")
+    print("Confusion matrix saved to confusion_matrix.png")
+
     return model
 
 
 if __name__ == "__main__":
     model = train_model(
-        num_epochs=100,
+        num_epochs=150,
         batch_size = 25600,
         checkpoint_path = "checkpoint.pth"
     )
